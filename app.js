@@ -17,11 +17,19 @@ const bodyparser = require("body-parser");
 const cookieParser = require("cookie-parser");
 // create session to keep user log in
 const session = require("express-session");
-const RedisStore = require('connect-redis')(session);
-const redis = require('redis');
-const redisClient = redis.createClient();
 const nodemon = require("nodemon");
 const supabase = require('./supabaseClient');
+
+const RedisStore = require('connect-redis').default;
+const { createClient } = require('redis');
+
+// Redis client configuration (using v4 syntax)
+let redisClient = createClient({
+  url: process.env.REDIS_URL,
+  legacyMode: true  // Needed for compatibility with `connect-redis`
+});
+
+redisClient.connect().catch(console.error);
 
 const port = process.env.PORT || 3001
 
@@ -67,7 +75,7 @@ app.use(
       // sameSite: strict, // Prevents CSRF attacks; use 'strict' in production
       // or lax
       // httpOnly: true, // Helps prevent XSS attacks by not allowing client-side JavaScript to access the cookie
-      secure:true,
+      secure:false,
       expires: 1000 * 60 * 60 * 24,
     },
   })
