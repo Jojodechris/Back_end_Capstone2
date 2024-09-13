@@ -17,8 +17,13 @@ const bodyparser = require("body-parser");
 const cookieParser = require("cookie-parser");
 // create session to keep user log in
 const session = require("express-session");
+const RedisStore = require('connect-redis')(session);
+const redis = require('redis');
+const redisClient = redis.createClient();
 const nodemon = require("nodemon");
 const supabase = require('./supabaseClient');
+
+const port = process.env.PORT || 3001
 
 // Database configuration
 const db = new Pool({
@@ -29,12 +34,15 @@ const db = new Pool({
   database: process.env.DATABASE_NAME
 });
 
+const isProduction = process.env.NODE_ENV === 'development';
+
 app.use(bodyparser.json());
 app.use(express.json());
 app.use(
   cors({
-    AccessControlAllowOrigin: ["http://localhost:3000","http://localhost:3001","https://capstone-project2-pt29.onrender.com/"],
-    origin: "http://localhost:3001",
+    AccessControlAllowOrigin: ["http://localhost:3000","http://localhost:3001","https://capstone-project2-pt29.onrender.com/","https://front-end-4ytj.onrender.com"],
+    origin:"https://front-end-4ytj.onrender.com",
+    // origin:"http://localhost:3000",
     methods: ("GET", "POST", "PUT", "DELETE"),
     credentials: true
   })
@@ -46,41 +54,75 @@ app.use(bodyparser());
 
 app.use(
   session({
-    key: "userid",
+    store: new RedisStore({ client: redisClient }),
+    key: "user",
     secret: "secret",
     resave: false,
-    saveUninitialized: false,
+    // what works loacally
+    // saveUninitialized: true,
+    // secure:false,
+    saveUninitialized: true,
     cookie: {
-      secure: false,
+      // secure: false, // Ensure cookies are only sent over HTTPS in production
+      // sameSite: strict, // Prevents CSRF attacks; use 'strict' in production
+      // or lax
+      // httpOnly: true, // Helps prevent XSS attacks by not allowing client-side JavaScript to access the cookie
+      secure:true,
       expires: 1000 * 60 * 60 * 24,
     },
   })
 );
 
-// app.get("/",
-//  (req ,res)=>{
-//   res.send("hey")
-//  })
+
+
 
 app.post("/signup", async (request, response) => {
   const { username, password } = request.body;
-  console.log(username + password);
-  request.session.user = request.body.username;
+  console.log("Username:", username); // Log username separately
+
   try {
     const hashedPassword = await bcrypt.hash(password, saltRounds);
+    
     const { data, error } = await supabase
-    .from('users')
-    .insert([{ username, password: hashedPassword }]);
-    if (error) throw error;
-
-    response.json({ success: true, message: "User signed up successfully" });
+      .from('users')
+      .insert([{ username, password: hashedPassword }])
+      .select().single();
+      console.log('ERROR',error)
+      console.error("error",error)
+    if (data) {  // Check if data exists
+      console.log(data)
+      request.session.user = data;  // Assign the session
+      response.json({ success: true, message: "User signed up successfully" });
+    } else {
+      // Handle potential insertion errors
+      response.status(400).json({ success: false, message: error});
+    }
   } catch (error) {
-    console.error(error);
     response
       .status(500)
       .json({ success: false, message: "Internal server error" });
   }
 });
+
+    
+    // if (error) {
+    //   // Check for specific errors (e.g., username conflict)
+    //   if (error.code === '23505') {
+    //     response.status(400).json({ success: false, message: "Username already exists" });
+    //   } else {
+    //     throw error; // Re-throw other errors for generic handling
+    //   }
+    // }
+
+//     request.session.user = request.body.username;
+//     response.json({ success: true, message: "User signed up successfully" });
+//   } catch (error) {
+//     console.error(error);
+//     response
+//       .status(500)
+//       .json({ success: false, message: "Internal server error" });
+//   }
+// });
     // await db.query(`INSERT INTO users (username, password) VALUES ($1, $2)`, [
     //   username,
     //   hashedPassword,
@@ -119,59 +161,98 @@ app.get("/login", (request, response) => {
   }
 });
 
-app.get("/", (request, response) => {
+app.get("/isUserLoggedIn", (request, response) => {
   // localStorage.getItem("favs");
-  if (request.session.username) {
+  console.log("request.session.user",request.session.user)
+  if (request.session.user) {
     console.log("heyo");
-    return response.json({ valid: true, username: request.session.username });
+    return response.json({ valid: true, username: request.session.user.username });
   } else {
     return response.json({ valid: false });
   }
 });
 
+
 app.post("/login", async (request, response) => {
   const { username, password } = request.body;
+  console.log("Username:", username);
 
   try {
-    const result = await db.query("SELECT * FROM users WHERE username = $1", [
-      username,
-    ]);
+    const { data, error } = await supabase
+      .from('users')
+      .select()
+      .eq('username', username)
+      .single(); // Expecting only one user
 
-    if (result.rows.length > 0) {
-      const match = await bcrypt.compare(password, result.rows[0].password);
+    if (error) {
+      response.status(400).json({ success: false, message: "User not found" });
+      return;
+    }
 
-      if (match) {
-        // save user in the session
-        request.session.username = result.rows[0].username;
-        console.log(result);
-        request.session.userId = result.rows[0].id;
-        console.log(request.session.userId, "user id");
-        console.log(request.session.username);
-        response.json({
-          success: true,
-          message: "Login successful",
-          user: result.rows[0],
-        });
-      } else {
-        response
-          .status(401)
-          .json({ success: false, message: "Wrong password" });
-      }
+    const user = data;
+
+    const passwordMatch = await bcrypt.compare(password, user.password);
+
+    if (passwordMatch) {
+      request.session.user = data;
+      console.log("data",data)
+      console.log("userlogin",request.session.user)
+      request.session.save()
+      response.json({ success: true, message: "Login successful" });
     } else {
-      response.status(404).json({ success: false, message: "User not found" });
+      response.status(401).json({ success: false, message: "Invalid credentials" });
     }
   } catch (error) {
-    console.error(error);
     response
       .status(500)
       .json({ success: false, message: "Internal server error" });
   }
 });
+
+
+// app.post("/login", async (request, response) => {
+//   const { username, password } = request.body;
+
+//   try {
+//     const result = await db.query("SELECT * FROM users WHERE username = $1", [
+//       username,
+//     ]);
+
+//     if (result.rows.length > 0) {
+//       const match = await bcrypt.compare(password, result.rows[0].password);
+
+//       if (match) {
+//         // save user in the session
+//         request.session.username = result.rows[0].username;
+//         console.log(result);
+//         request.session.userId = result.rows[0].id;
+//         console.log(request.session.userId, "user id");
+//         console.log(request.session.username);
+//         response.json({
+//           success: true,
+//           message: "Login successful",
+//           user: result.rows[0],
+//         });
+//       } else {
+//         response
+//           .status(401)
+//           .json({ success: false, message: "Wrong password" });
+//       }
+//     } else {
+//       response.status(404).json({ success: false, message: "User not found" });
+//     }
+//   } catch (error) {
+//     console.error(error);
+//     response
+//       .status(500)
+//       .json({ success: false, message: "Internal server error" });
+//   }
+// });
 // backend
 app.post("/favorites", async (req, res) => {
   const { bookId, isFavorite } = req.body;
-  const userId = req.session.userId;
-
+  const userId = req.session.user.id;
+ 
   console.log("req.session", req.params); // Assuming you have a logged-in user in the session
   console.log("added to favorite ");
   console.log("UserID", userId);
@@ -217,7 +298,7 @@ app.post("/favorites", async (req, res) => {
 // }
 
 app.get("/displayfavorites", async (req, res) => {
-  const userId = req.session.userId;
+  const userId = req.session.user.id;
   try {
     const favorite = await db.query(
       "SELECT * FROM favorites WHERE user_id = $1",
@@ -232,7 +313,7 @@ app.get("/displayfavorites", async (req, res) => {
 });
 
 app.get("/likedBooks", async (req, res) => {
-  // const userId = req.session.userId
+  // const userId = req.session.user.id
   try {
     // const {bookId} = req.body;
 
@@ -294,7 +375,7 @@ app.get("/likedBooks", async (req, res) => {
 
 app.post("/reviews/:bookId", async (request, res) => {
   const { bookId, newReview } = request.body;
-  const userId = request.session.userId;
+  const userId = request.session.user.id;
   console.log("userID creator", userId);
 
   const { content, rating } = newReview;
@@ -331,7 +412,7 @@ app.get("/reviews/:bookId", async (req, res) => {
 
   try {
     // 1. Get user ID from session (assuming it's stored there)
-    const userId = req.session.userId;
+    const userId = req.session.user.id;
 
     // 2. Query for reviews of the specific book
     const reviews = await db.query(
@@ -413,7 +494,7 @@ app.put("/update-profile", async (req, res) => {
   }
 });
 
-const PORT = 3001;
-app.listen(PORT, () => {
-  console.log(`Server started on port ${PORT}`);
+// const PORT = 3001;
+app.listen(port, () => {
+  console.log(`Server started on port ${port}`);
 });
